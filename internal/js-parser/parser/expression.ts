@@ -388,7 +388,6 @@ function _parseMaybeAssign<T extends AnyNode>(
 	if (afterLeftParse) {
 		left = afterLeftParse(parser, left, startPos);
 	}
-
 	if (parser.state.tokenType.isAssign) {
 		const operator = String(parser.state.tokenValue) as AssignmentOperator;
 		const leftPatt = toAssignmentPattern(parser, left, "assignment expression");
@@ -2406,24 +2405,32 @@ export function parseObjectExpression(
 	parser: JSParser,
 	refShorthandDefaultPos?: IndexTracker,
 ): JSObjectExpression {
+	// A miss behavior of this parser, is to use a syntax for default values
+	// destructuring accepting things like that: let foo = ({ bar = 'baz'}) => bar
 	const propHash: Set<string> = new Set();
 	let first = true;
+	let isLastUsageOfEq = false;
 
 	const start = parser.getPosition();
 	const properties = [];
 
-	const openContext = expectOpening(parser, tt.braceL, tt.braceR, "object");
-
 	while (true) {
-		if (match(parser, tt.braceR) || match(parser, tt.eof)) {
-			expectClosing(parser, openContext);
-			break;
-		}
-
 		if (first) {
 			first = false;
 		} else {
-			if (!expect(parser, tt.comma)) {
+			if (isLastUsageOfEq && !match(parser, tt.eq)) {
+				isLastUsageOfEq = false;
+			}
+
+			if (!isLastUsageOfEq && eat(parser, tt.eq)) {
+				isLastUsageOfEq = true;
+			}
+
+			if (isLastUsageOfEq && !expect(parser, tt.comma)) {
+				break;
+			}
+
+			if (match(parser, tt.eof)) {
 				break;
 			}
 
@@ -2844,6 +2851,35 @@ export function parseObjectProperty(
 	isPattern: boolean,
 	refShorthandDefaultPos: undefined | IndexTracker,
 ): undefined | JSObjectProperty | JSBindingObjectPatternProperty {
+	if (eat(parser, tt.eq)) {
+		if (isPattern) {
+			const value = parseMaybeDefault(parser);
+			return parser.finishNode(
+				start,
+				{
+					key,
+					type: "JSBindingObjectPatternProperty",
+					value,
+				},
+			);
+		} else {
+			const value = parseMaybeAssign(
+				parser,
+				"assignment right",
+				false,
+				refShorthandDefaultPos,
+			);
+			return parser.finishNode(
+				start,
+				{
+					key,
+					type: "JSObjectProperty",
+					value,
+				},
+			);
+		}
+	}
+
 	if (eat(parser, tt.colon)) {
 		if (isPattern) {
 			const value = parseMaybeDefault(parser);
@@ -3716,6 +3752,13 @@ export function parseIdentifierName(
 
 	if (match(parser, tt.name)) {
 		name = String(parser.state.tokenValue);
+	} else if (match(parser, tt.braceR) && parser.state.context[0].token === tt.braceL.label) {
+		name = "object";
+		parser.state.context.shift();
+	} else if (match(parser, tt.parenR) && parser.state.context[0].token === tt.parenL.label) {
+		name = "call-expression";
+	} else if (match(parser, tt.semi) && parser.state.context[0].token === tt.parenL.label) {
+		name = "termination";
 	} else if (parser.state.tokenType.keyword !== undefined) {
 		name = parser.state.tokenType.keyword;
 
